@@ -1,0 +1,20 @@
+name: "Tests"
+
+on:
+  push:
+  schedule:
+    - cron: "0 3 * * 5"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: mlugg/setup-zig@v1
+      - name: Formatting
+        run: zig fmt --check src/*.zig
+      - name: Build executable
+        run: zig build
+      - name: Run small benchmark
+        run: ./zig-out/bin/spice-example -n 10000 --baseline -t 2
