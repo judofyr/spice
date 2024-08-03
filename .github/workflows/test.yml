@@ -17,4 +17,6 @@ jobs:
       - name: Build executable
         run: zig build
       - name: Run small benchmark
-        run: ./zig-out/bin/spice-example -n 10000 --baseline -t 2
+        run: ./zig-out/bin/spice-example -n 10000 --baseline -t 1 -t 2 -t 4
+        # According to https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners/about-github-hosted-runners
+        # `ubuntu-latest` has 4 processes so we expect some speed-up here.
