@@ -305,7 +305,7 @@ pub const Task = struct {
 
     pub inline fn tick(self: *Task) void {
         if (self.worker.heartbeat.load(.monotonic)) {
-            @call(.never_inline, ThreadPool.heartbeat, .{ self.worker.pool, self.worker });
+            self.worker.pool.heartbeat(self.worker);
         }
     }
 
@@ -543,10 +543,7 @@ pub fn Future(comptime Input: type, Output: type) type {
                     self.job.pop(&task.job_tail);
                     return null;
                 },
-                .executing => {
-                    // never_inline + setCold helps to keep this off the hot path.
-                    return @call(.never_inline, joinExecuting, .{ self, task });
-                },
+                .executing => return self.joinExecuting(task),
             }
         }
 
