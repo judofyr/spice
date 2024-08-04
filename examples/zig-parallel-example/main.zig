@@ -130,9 +130,7 @@ const SpiceTreeSum = struct {
     }
 
     pub fn run(self: *SpiceTreeSum, input: *Node) i64 {
-        var w = spice.Worker{ .pool = &self.thread_pool };
-        var t = w.begin();
-        return t.call(i64, sum, input);
+        return self.thread_pool.call(i64, sum, input);
     }
 };
 

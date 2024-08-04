@@ -13,12 +13,18 @@ pub const ThreadPool = struct {
     mutex: std.Thread.Mutex = .{},
     /// List of all background workers.
     background_workers: std.ArrayListUnmanaged(std.Thread) = .{},
+    /// The background thread which beats.
+    heartbeat_thread: ?std.Thread = null,
+    /// List of values to heartbeat.
+    heartbeats: std.ArrayListUnmanaged(*std.atomic.Value(bool)) = .{},
     /// The beginning of a linked-list for workers who are ready to pick up work.
     next_waiting_worker: ?*Worker = null,
     /// A pool for the JobExecuteState, to minimize allocations.
     execute_state_pool: std.heap.MemoryPool(JobExecuteState),
     /// This is used to wait for the background workers to be available initially.
     workers_ready: std.Thread.Semaphore = .{},
+    /// This is set to true once we're trying to stop.
+    is_stopping: bool = false,
 
     pub fn init(allocator: std.mem.Allocator) ThreadPool {
         return ThreadPool{
@@ -31,10 +37,15 @@ pub const ThreadPool = struct {
     pub fn start(self: *ThreadPool, config: ThreadPoolConfig) void {
         const actual_count = config.background_worker_count orelse (std.Thread.getCpuCount() catch @panic("getCpuCount error")) - 1;
         self.background_workers.ensureUnusedCapacity(self.allocator, actual_count) catch @panic("OOM");
+        self.heartbeats.ensureTotalCapacity(self.allocator, actual_count) catch @panic("OOM");
+
         for (0..actual_count) |_| {
             const thread = std.Thread.spawn(.{}, backgroundWorker, .{self}) catch @panic("spawn error");
             self.background_workers.append(self.allocator, thread) catch @panic("OOM");
         }
+
+        self.heartbeat_thread = std.Thread.spawn(.{}, heartbeatWorker, .{self}) catch @panic("spawn error");
+
         // Wait for all of them to be ready:
         for (0..actual_count) |_| {
             self.workers_ready.wait();
@@ -48,6 +59,8 @@ pub const ThreadPool = struct {
         {
             self.mutex.lock();
             defer self.mutex.unlock();
+
+            self.is_stopping = true;
 
             while (self.next_waiting_worker) |w| {
                 self.next_waiting_worker = w.next_worker;
@@ -67,10 +80,40 @@ pub const ThreadPool = struct {
             thread.join();
         }
 
+        if (self.heartbeat_thread) |thread| {
+            thread.join();
+        }
+
         // Free up memory:
         self.background_workers.deinit(self.allocator);
+        self.heartbeats.deinit(self.allocator);
         self.execute_state_pool.deinit();
         self.* = undefined;
+    }
+
+    pub fn call(self: *ThreadPool, comptime T: type, func: anytype, arg: anytype) T {
+        var worker = Worker{ .pool = self };
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.heartbeats.append(self.allocator, &worker.heartbeat) catch @panic("OOM");
+        }
+
+        defer {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            for (self.heartbeats.items, 0..) |beat, idx| {
+                if (beat == &worker.heartbeat) {
+                    _ = self.heartbeats.swapRemove(idx);
+                    break;
+                }
+            }
+        }
+
+        var t = worker.begin();
+        return t.call(T, func, arg);
     }
 
     fn addToWaitingQueue(self: *ThreadPool, worker: *Worker) void {
@@ -124,6 +167,8 @@ pub const ThreadPool = struct {
                 w.sendAction(.{ .invoke_job = job });
             }
         }
+
+        worker.heartbeat.store(false, .monotonic);
     }
 
     fn destroyExecuteState(self: *ThreadPool, exec_state: *JobExecuteState) void {
@@ -136,6 +181,13 @@ pub const ThreadPool = struct {
     fn backgroundWorker(self: *ThreadPool) void {
         var w = Worker{ .pool = self };
         var first = true;
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            self.heartbeats.append(self.allocator, &w.heartbeat) catch @panic("OOM");
+        }
+
         while (true) {
             self.addToWaitingQueue(&w);
 
@@ -161,6 +213,32 @@ pub const ThreadPool = struct {
                 },
                 .stop => break,
             }
+        }
+    }
+
+    fn heartbeatWorker(self: *ThreadPool) void {
+        const heartbeat_interval = 100 * std.time.ns_per_us;
+        var i: usize = 0;
+
+        while (true) {
+            var to_sleep: u64 = heartbeat_interval;
+
+            {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+
+                if (self.is_stopping) break;
+
+                const heartbeats = self.heartbeats.items;
+                if (heartbeats.len > 0) {
+                    i %= heartbeats.len;
+                    heartbeats[i].store(true, .monotonic);
+                    i += 1;
+                    to_sleep /= heartbeats.len;
+                }
+            }
+
+            std.time.sleep(to_sleep);
         }
     }
 
@@ -196,13 +274,13 @@ pub const Worker = struct {
     next_action: ?WorkerAction = null,
     next_worker: ?*Worker = null,
     current_execute_state: ?*JobExecuteState = null,
+    heartbeat: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn begin(self: *Worker) Task {
         std.debug.assert(self.job_head.isTail());
 
         return Task{
             .worker = self,
-            .last_heartbeat = clock.read(),
             .job_tail = &self.job_head,
         };
     }
@@ -223,13 +301,10 @@ pub const Worker = struct {
 
 pub const Task = struct {
     worker: *Worker,
-    last_heartbeat: u64,
     job_tail: *Job,
 
     pub inline fn tick(self: *Task) void {
-        const now = clock.read();
-        if (now - self.last_heartbeat > clock.heartbeat_interval) {
-            self.last_heartbeat = now;
+        if (self.worker.heartbeat.load(.monotonic)) {
             @call(.never_inline, ThreadPool.heartbeat, .{ self.worker.pool, self.worker });
         }
     }
@@ -237,13 +312,11 @@ pub const Task = struct {
     pub inline fn call(self: *Task, comptime T: type, func: anytype, arg: anytype) T {
         const result = callWithContext(
             self.worker,
-            self.last_heartbeat,
             self.job_tail,
             T,
             func,
             arg,
         );
-        self.last_heartbeat = result.last_heartbeat;
         self.job_tail = result.job_tail;
         return result.value;
     }
@@ -251,7 +324,6 @@ pub const Task = struct {
     inline fn resultWith(self: *Task, value: anytype) Result(@TypeOf(value)) {
         return Result(@TypeOf(value)){
             .value = value,
-            .last_heartbeat = self.last_heartbeat,
             .job_tail = self.job_tail,
         };
     }
@@ -261,7 +333,6 @@ fn Result(comptime T: type) type {
     return packed struct {
         pub const Value = T;
         value: T,
-        last_heartbeat: u64,
         job_tail: *Job,
     };
 }
@@ -273,7 +344,6 @@ fn Result(comptime T: type) type {
 // of last_heartbeat and job_tail.
 fn callWithContext(
     worker: *Worker,
-    last_heartbeat: u64,
     job_tail: *Job,
     comptime T: type,
     func: anytype,
@@ -281,7 +351,6 @@ fn callWithContext(
 ) Result(T) {
     var t = Task{
         .worker = worker,
-        .last_heartbeat = last_heartbeat,
         .job_tail = job_tail,
     };
     t.tick();
