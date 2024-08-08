@@ -497,8 +497,6 @@ pub fn Future(comptime Input: type, Output: type) type {
 
         job: Job,
         input: Input,
-        // more: [1000]u64 = undefined,
-        more: [3]u64 = .{123} ** 3,
 
         pub inline fn init() Self {
             return Self{ .job = Job.pending(), .input = undefined };
