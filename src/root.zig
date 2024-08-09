@@ -310,32 +310,15 @@ pub const Task = struct {
     }
 
     pub inline fn call(self: *Task, comptime T: type, func: anytype, arg: anytype) T {
-        const result = callWithContext(
+        return callWithContext(
             self.worker,
             self.job_tail,
             T,
             func,
             arg,
         );
-        self.job_tail = result.job_tail;
-        return result.value;
-    }
-
-    inline fn resultWith(self: *Task, value: anytype) Result(@TypeOf(value)) {
-        return Result(@TypeOf(value)){
-            .value = value,
-            .job_tail = self.job_tail,
-        };
     }
 };
-
-fn Result(comptime T: type) type {
-    return packed struct {
-        pub const Value = T;
-        value: T,
-        job_tail: *Job,
-    };
-}
 
 // The following function's signature is actually extremely critical. We take in all of
 // the task state (worker, last_heartbeat, job_tail) as parameters. The reason for this
@@ -348,17 +331,16 @@ fn callWithContext(
     comptime T: type,
     func: anytype,
     arg: anytype,
-) Result(T) {
+) T {
     var t = Task{
         .worker = worker,
         .job_tail = job_tail,
     };
     t.tick();
-    const value = @call(.always_inline, func, .{
+    return @call(.always_inline, func, .{
         &t,
         arg,
     });
-    return t.resultWith(value);
 }
 
 pub const JobState = enum {
