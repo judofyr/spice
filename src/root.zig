@@ -1,7 +1,5 @@
 const std = @import("std");
 
-pub const clock = @import("clock.zig").default;
-
 pub const ThreadPoolConfig = struct {
     /// The number of background workers. If `null` this chooses a sensible
     /// default based on your system (i.e. number of cores).

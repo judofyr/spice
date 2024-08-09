@@ -223,7 +223,6 @@ pub fn main() !void {
     defer arena.deinit();
 
     var n: ?usize = null;
-    var measure_clock = false;
     var csv: ?std.fs.File = null;
     var enable_baseline = false;
     var num_threads_list = std.ArrayList(usize).init(gpa.allocator());
@@ -256,8 +255,6 @@ pub fn main() !void {
                     const num_threads = std.fmt.parseInt(usize, num_threads_str, 10) catch failArgs("{} must be an integer", .{flag});
                     try num_threads_list.append(num_threads);
                     defaults = false;
-                } else if (flag.isLong("measure-clock")) {
-                    measure_clock = true;
                 } else if (flag.isShort("h") or flag.isLong("help")) {
                     show_usage = true;
                 } else {
@@ -276,14 +273,6 @@ pub fn main() !void {
     if (show_usage or no_args) {
         std.debug.print(usage, .{});
         std.process.exit(0);
-    }
-
-    if (measure_clock) {
-        const now = spice.clock.read();
-        std.time.sleep(1 * std.time.ns_per_ms);
-        const dur = spice.clock.read() - now;
-        std.debug.print("1 ms = {} ticks\n", .{dur});
-        std.debug.print("1 µs = {} ticks\n", .{dur / 1000});
     }
 
     if (n == null) {
