@@ -2,6 +2,7 @@ name: "Tests"
 
 on:
   push:
+    paths: ["src/**", "build.zig", "build.zig.zon"]
   schedule:
     - cron: "0 3 * * 5"
   workflow_dispatch:
