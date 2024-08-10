@@ -1,0 +1,7 @@
+Baseline,7.4849190632000004
+Rayon 1 thread,22.9933083354
+Rayon 2 threads,11.7585642422
+Rayon 4 threads,5.898856567
+Rayon 8 threads,2.9989583844
+Rayon 16 threads,1.6433929402
+Rayon 32 threads,1.651134205
