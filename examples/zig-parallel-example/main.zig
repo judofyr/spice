@@ -134,8 +134,8 @@ const SpiceTreeSum = struct {
     }
 };
 
-const n_samples = 10;
-const warmup_duration = 1 * std.time.ns_per_s;
+const n_samples = 50;
+const warmup_duration = 3 * std.time.ns_per_s;
 
 const Runner = struct {
     allocator: std.mem.Allocator,
