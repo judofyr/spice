@@ -1,45 +1,62 @@
 const std = @import("std");
 
+// The overall design of Spice is as follows:
+// - ThreadPool spawns threads which acts as background workers.
+// - A Worker, while executing, will share one piece of work (`shared_job`).
+// - A Worker, while waiting, will look for shared jobs by other workers.
+
 pub const ThreadPoolConfig = struct {
     /// The number of background workers. If `null` this chooses a sensible
     /// default based on your system (i.e. number of cores).
     background_worker_count: ?usize = null,
+
+    /// How often a background thread is interrupted to find more work.
+    heartbeat_interval: usize = 100 * std.time.ns_per_us,
 };
 
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex = .{},
+    /// List of all workers.
+    workers: std.ArrayListUnmanaged(*Worker) = .{},
     /// List of all background workers.
-    background_workers: std.ArrayListUnmanaged(std.Thread) = .{},
+    background_threads: std.ArrayListUnmanaged(std.Thread) = .{},
     /// The background thread which beats.
     heartbeat_thread: ?std.Thread = null,
-    /// List of values to heartbeat.
-    heartbeats: std.ArrayListUnmanaged(*std.atomic.Value(bool)) = .{},
-    /// The beginning of a linked-list for workers who are ready to pick up work.
-    next_waiting_worker: ?*Worker = null,
     /// A pool for the JobExecuteState, to minimize allocations.
     execute_state_pool: std.heap.MemoryPool(JobExecuteState),
+    /// This is used to signal that more jobs are now ready.
+    job_ready: std.Thread.Condition = .{},
     /// This is used to wait for the background workers to be available initially.
     workers_ready: std.Thread.Semaphore = .{},
     /// This is set to true once we're trying to stop.
     is_stopping: bool = false,
 
+    /// A timer which we increment whenever we share a job.
+    /// This is used to prioritize always picking the oldest job.
+    time: usize = 0,
+
+    heartbeat_interval: usize,
+
     pub fn init(allocator: std.mem.Allocator) ThreadPool {
         return ThreadPool{
             .allocator = allocator,
             .execute_state_pool = std.heap.MemoryPool(JobExecuteState).init(allocator),
+            .heartbeat_interval = undefined,
         };
     }
 
     /// Starts the thread pool. This should only be invoked once.
     pub fn start(self: *ThreadPool, config: ThreadPoolConfig) void {
         const actual_count = config.background_worker_count orelse (std.Thread.getCpuCount() catch @panic("getCpuCount error")) - 1;
-        self.background_workers.ensureUnusedCapacity(self.allocator, actual_count) catch @panic("OOM");
-        self.heartbeats.ensureTotalCapacity(self.allocator, actual_count) catch @panic("OOM");
+
+        self.heartbeat_interval = config.heartbeat_interval;
+        self.background_threads.ensureUnusedCapacity(self.allocator, actual_count) catch @panic("OOM");
+        self.workers.ensureUnusedCapacity(self.allocator, actual_count) catch @panic("OOM");
 
         for (0..actual_count) |_| {
             const thread = std.Thread.spawn(.{}, backgroundWorker, .{self}) catch @panic("spawn error");
-            self.background_workers.append(self.allocator, thread) catch @panic("OOM");
+            self.background_threads.append(self.allocator, thread) catch @panic("OOM");
         }
 
         self.heartbeat_thread = std.Thread.spawn(.{}, heartbeatWorker, .{self}) catch @panic("spawn error");
@@ -51,30 +68,17 @@ pub const ThreadPool = struct {
     }
 
     pub fn deinit(self: *ThreadPool) void {
-        var stopped_workers: usize = 0;
-
         // Tell all background workers to stop:
         {
             self.mutex.lock();
             defer self.mutex.unlock();
 
             self.is_stopping = true;
-
-            while (self.next_waiting_worker) |w| {
-                self.next_waiting_worker = w.next_worker;
-                w.next_worker = null;
-
-                w.sendAction(.stop);
-                stopped_workers += 1;
-            }
-        }
-
-        if (stopped_workers != self.background_workers.items.len) {
-            @panic("TheadPool deinited while background workers were busy");
+            self.job_ready.broadcast();
         }
 
         // Wait for background workers to stop:
-        for (self.background_workers.items) |thread| {
+        for (self.background_threads.items) |thread| {
             thread.join();
         }
 
@@ -83,28 +87,92 @@ pub const ThreadPool = struct {
         }
 
         // Free up memory:
-        self.background_workers.deinit(self.allocator);
-        self.heartbeats.deinit(self.allocator);
+        self.background_threads.deinit(self.allocator);
+        self.workers.deinit(self.allocator);
         self.execute_state_pool.deinit();
         self.* = undefined;
     }
 
+    fn backgroundWorker(self: *ThreadPool) void {
+        var w = Worker{ .pool = self };
+        var first = true;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.workers.append(self.allocator, &w) catch @panic("OOM");
+
+        // We don't bother removing ourselves from the workers list of exit since
+        // this only happens when the whole thread pool is destroyed anyway.
+
+        while (true) {
+            if (self.is_stopping) break;
+
+            if (self._popReadyJob()) |job| {
+                // Release the lock while executing the job.
+                self.mutex.unlock();
+                defer self.mutex.lock();
+
+                w.executeJob(job);
+
+                continue; // Go straight to another attempt of finding more work.
+            }
+
+            if (first) {
+                // Register that we are ready.
+                self.workers_ready.post();
+                first = false;
+            }
+
+            self.job_ready.wait(&self.mutex);
+        }
+    }
+
+    fn heartbeatWorker(self: *ThreadPool) void {
+        // We try to make sure that each worker is being heartbeat at the
+        // fixed interval by going through the workers-list one by one.
+        var i: usize = 0;
+
+        while (true) {
+            var to_sleep: u64 = self.heartbeat_interval;
+
+            {
+                self.mutex.lock();
+                defer self.mutex.unlock();
+
+                if (self.is_stopping) break;
+
+                const workers = self.workers.items;
+                if (workers.len > 0) {
+                    i %= workers.len;
+                    workers[i].heartbeat.store(true, .monotonic);
+                    i += 1;
+                    to_sleep /= workers.len;
+                }
+            }
+
+            std.time.sleep(to_sleep);
+        }
+    }
+
     pub fn call(self: *ThreadPool, comptime T: type, func: anytype, arg: anytype) T {
+        // Create an one-off worker:
+
         var worker = Worker{ .pool = self };
         {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            self.heartbeats.append(self.allocator, &worker.heartbeat) catch @panic("OOM");
+            self.workers.append(self.allocator, &worker) catch @panic("OOM");
         }
 
         defer {
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            for (self.heartbeats.items, 0..) |beat, idx| {
-                if (beat == &worker.heartbeat) {
-                    _ = self.heartbeats.swapRemove(idx);
+            for (self.workers.items, 0..) |worker_ptr, idx| {
+                if (worker_ptr == &worker) {
+                    _ = self.workers.swapRemove(idx);
                     break;
                 }
             }
@@ -114,59 +182,89 @@ pub const ThreadPool = struct {
         return t.call(T, func, arg);
     }
 
-    fn addToWaitingQueue(self: *ThreadPool, worker: *Worker) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        // Add ourselves to the queue:
-        worker.next_worker = self.next_waiting_worker;
-        self.next_waiting_worker = worker;
-    }
-
+    /// The core logic of the heartbeat. Every executing worker invokes this periodically.
     fn heartbeat(self: *ThreadPool, worker: *Worker) void {
         @setCold(true);
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (worker.current_execute_state) |exec_state| {
-            // Prefer sending work to the requester if it's waiting:
-            if (exec_state.isWaiting()) {
-                if (worker.job_head.shift()) |job| {
-                    // Allocate an execute state for it:
-                    const execute_state = self.execute_state_pool.create() catch @panic("OOM");
-                    execute_state.* = .{
-                        .result = undefined,
-                        .requester = worker,
-                    };
-                    job.setExecuteState(execute_state);
-                    exec_state.requester.next_action = .{ .invoke_job = job };
-                    exec_state.done.set();
-                }
-
-                return;
-            }
-        }
-
-        if (self.next_waiting_worker) |w| {
+        if (worker.shared_job == null) {
             if (worker.job_head.shift()) |job| {
-                // Move it out of the queue:
-                self.next_waiting_worker = w.next_worker;
-                w.next_worker = null;
-
                 // Allocate an execute state for it:
                 const execute_state = self.execute_state_pool.create() catch @panic("OOM");
                 execute_state.* = .{
                     .result = undefined,
-                    .requester = worker,
                 };
                 job.setExecuteState(execute_state);
 
-                w.sendAction(.{ .invoke_job = job });
+                worker.shared_job = job;
+                worker.job_time = self.time;
+                self.time += 1;
+
+                self.job_ready.signal(); // wake up one thread
             }
         }
 
         worker.heartbeat.store(false, .monotonic);
+    }
+
+    /// Waits for (a shared) job to be completed.
+    /// This returns `false` if it turns out the job was not actually started.
+    fn waitForJob(self: *ThreadPool, worker: *Worker, job: *Job) bool {
+        const exec_state = job.getExecuteState();
+
+        {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (worker.shared_job == job) {
+                // This is the job we attempted to share with someone else, but before someone picked it up.
+                worker.shared_job = null;
+                self.execute_state_pool.destroy(exec_state);
+                return false;
+            }
+
+            // Help out by picking up more work if it's available.
+            while (!exec_state.done.isSet()) {
+                if (self._popReadyJob()) |other_job| {
+                    self.mutex.unlock();
+                    defer self.mutex.lock();
+
+                    worker.executeJob(other_job);
+                } else {
+                    break;
+                }
+            }
+        }
+
+        exec_state.done.wait();
+        return true;
+    }
+
+    /// Finds a job that's ready to be executed.
+    fn _popReadyJob(self: *ThreadPool) ?*Job {
+        var best_worker: ?*Worker = null;
+
+        for (self.workers.items) |other_worker| {
+            if (other_worker.shared_job) |_| {
+                if (best_worker) |best| {
+                    if (other_worker.job_time < best.job_time) {
+                        // Pick this one instead if it's older.
+                        best_worker = other_worker;
+                    }
+                } else {
+                    best_worker = other_worker;
+                }
+            }
+        }
+
+        if (best_worker) |worker| {
+            defer worker.shared_job = null;
+            return worker.shared_job;
+        }
+
+        return null;
     }
 
     fn destroyExecuteState(self: *ThreadPool, exec_state: *JobExecuteState) void {
@@ -175,104 +273,19 @@ pub const ThreadPool = struct {
 
         self.execute_state_pool.destroy(exec_state);
     }
-
-    fn backgroundWorker(self: *ThreadPool) void {
-        var w = Worker{ .pool = self };
-        var first = true;
-
-        {
-            self.mutex.lock();
-            defer self.mutex.unlock();
-            self.heartbeats.append(self.allocator, &w.heartbeat) catch @panic("OOM");
-        }
-
-        while (true) {
-            self.addToWaitingQueue(&w);
-
-            if (first) {
-                // Report the first time we've queued up.
-                self.workers_ready.post();
-                first = false;
-            }
-
-            w.waker.wait();
-            w.waker.reset();
-
-            // The waker should make sure we're no longer in the queue.
-            std.debug.assert(w.next_worker == null);
-
-            const action = w.next_action.?;
-            w.next_action = null;
-
-            switch (action) {
-                .invoke_job => |job| {
-                    w.executeJob(job);
-                    std.debug.assert(w.job_head.isTail());
-                },
-                .stop => break,
-            }
-        }
-    }
-
-    fn heartbeatWorker(self: *ThreadPool) void {
-        const heartbeat_interval = 100 * std.time.ns_per_us;
-        var i: usize = 0;
-
-        while (true) {
-            var to_sleep: u64 = heartbeat_interval;
-
-            {
-                self.mutex.lock();
-                defer self.mutex.unlock();
-
-                if (self.is_stopping) break;
-
-                const heartbeats = self.heartbeats.items;
-                if (heartbeats.len > 0) {
-                    i %= heartbeats.len;
-                    heartbeats[i].store(true, .monotonic);
-                    i += 1;
-                    to_sleep /= heartbeats.len;
-                }
-            }
-
-            std.time.sleep(to_sleep);
-        }
-    }
-
-    fn waitForStop(self: *ThreadPool, worker: *Worker, event: *std.Thread.ResetEvent) void {
-        _ = self;
-
-        while (true) {
-            event.wait();
-            event.reset();
-
-            if (worker.next_action) |action| {
-                worker.next_action = null;
-                switch (action) {
-                    .invoke_job => |job| worker.executeJob(job),
-                    .stop => unreachable,
-                }
-            } else {
-                break;
-            }
-        }
-    }
-};
-
-const WorkerAction = union(enum) {
-    invoke_job: *Job,
-    stop,
 };
 
 pub const Worker = struct {
     pool: *ThreadPool,
     job_head: Job = Job.head(),
-    waker: std.Thread.ResetEvent = .{},
-    next_action: ?WorkerAction = null,
-    next_worker: ?*Worker = null,
-    current_execute_state: ?*JobExecuteState = null,
-    heartbeat: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    /// A job (guaranteed to be in executing state) which other workers can pick up.
+    shared_job: ?*Job = null,
+    /// The time when the job was shared. Used for prioritizing which job to pick up.
+    job_time: usize = 0,
+
+    /// The heartbeat value. This is set to `true` to signal we should do a heartbeat action.
+    heartbeat: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 
     pub fn begin(self: *Worker) Task {
         std.debug.assert(self.job_head.isTail());
@@ -283,17 +296,9 @@ pub const Worker = struct {
         };
     }
 
-    fn sendAction(self: *Worker, action: WorkerAction) void {
-        self.next_action = action;
-        self.waker.set();
-    }
-
     fn executeJob(self: *Worker, job: *Job) void {
-        const exec_state = self.current_execute_state;
-        self.current_execute_state = job.getExecuteState();
         var t = self.begin();
         job.handler.?(&t, job);
-        self.current_execute_state = exec_state;
     }
 };
 
@@ -447,9 +452,6 @@ const Job = struct {
 const max_result_words = 4;
 
 const JobExecuteState = struct {
-    // The worker which originally placed the job on the queue and then decided
-    // the work should be done in a different thread/worker.
-    requester: *Worker,
     done: std.Thread.ResetEvent = .{},
     result: ResultType,
 
@@ -462,12 +464,6 @@ const JobExecuteState = struct {
 
         const bytes = std.mem.sliceAsBytes(&self.result);
         return std.mem.bytesAsValue(T, bytes);
-    }
-
-    /// Returns true if the requester is currently _definitely_ waiting.
-    fn isWaiting(self: *JobExecuteState) bool {
-        // This is a bit hacky:
-        return self.done.impl.state.load(.monotonic) == 1;
     }
 };
 
@@ -482,6 +478,8 @@ pub fn Future(comptime Input: type, Output: type) type {
             return Self{ .job = Job.pending(), .input = undefined };
         }
 
+        /// Schedules a piece of work to be executed by another thread.
+        /// After this has been called you MUST call `join` or `tryJoin`.
         pub inline fn fork(
             self: *Self,
             task: *Task,
@@ -491,10 +489,8 @@ pub fn Future(comptime Input: type, Output: type) type {
             const handler = struct {
                 fn handler(t: *Task, job: *Job) void {
                     const fut: *Self = @fieldParentPtr("job", job);
-                    // Do the actual work:
-                    const value = t.call(Output, func, fut.input);
                     const exec_state = job.getExecuteState();
-                    // Place the result into the state and mark it as complete:
+                    const value = t.call(Output, func, fut.input);
                     exec_state.resultPtr(Output).* = value;
                     exec_state.done.set();
                 }
@@ -503,6 +499,9 @@ pub fn Future(comptime Input: type, Output: type) type {
             self.job.push(&task.job_tail, handler);
         }
 
+        /// Waits for the result of `fork`.
+        /// This is only safe to call if `fork` was _actually_ called.
+        /// Use `tryJoin` if you conditionally called it.
         pub inline fn join(
             self: *Self,
             task: *Task,
@@ -511,6 +510,8 @@ pub fn Future(comptime Input: type, Output: type) type {
             return self.tryJoin(task);
         }
 
+        /// Waits for the result of `fork`.
+        /// This function is safe to call even if you didn't call `fork` at all.
         pub inline fn tryJoin(
             self: *Self,
             task: *Task,
@@ -525,22 +526,20 @@ pub fn Future(comptime Input: type, Output: type) type {
             }
         }
 
-        fn joinExecuting(self: *Self, task: *Task) Output {
+        fn joinExecuting(self: *Self, task: *Task) ?Output {
             @setCold(true);
 
             const w = task.worker;
             const pool = w.pool;
             const exec_state = self.job.getExecuteState();
 
-            // Only the requester should call `join`.
-            std.debug.assert(w == exec_state.requester);
+            if (pool.waitForJob(w, &self.job)) {
+                const result = exec_state.resultPtr(Output).*;
+                pool.destroyExecuteState(exec_state);
+                return result;
+            }
 
-            // Wait until the background worker tells us we're done.
-            pool.waitForStop(w, &exec_state.done);
-
-            const result = exec_state.resultPtr(Output).*;
-            pool.destroyExecuteState(exec_state);
-            return result;
+            return null;
         }
     };
 }
