@@ -37,7 +37,7 @@ It becomes even more interesting if we're summing the nodes of a much smaller tr
 In this scenario we have a very short duration of our program:
 The baseline implementation takes 1.56 _microseconds_ in total to run.
 For some reason the overhead is a bit higher (~19 ns), but more concerningly we see that performance becomes _worse_ the _more_ threads we're adding.
-At 32 threads it's in total **60x times slower**.
+At 32 threads it's in total **60 times slower**.
 
 (In this case we're using 32 threads on a machine which only has 16 cores.
 It's not given that we would see the same slowdown for a machine with 32 cores.
