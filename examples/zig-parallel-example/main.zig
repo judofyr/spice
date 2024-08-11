@@ -28,9 +28,6 @@ const usage =
     \\  --csv <path>
     \\    Output the benchmark results as CSV.
     \\
-    \\  --measure-clock
-    \\    Measure how fast the internal clock ticks.
-    \\
     \\  -h, --help
     \\    Show this message.
     \\
