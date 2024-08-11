@@ -27,7 +27,7 @@ Further benchmarks are recommended to validate the findings.
 - Spice has sub-nanosecond overhead for a single invocation of `fork/join`.
   This means the smallest amount of work should take around **tens of nanoseconds** for the overhead be negligible (<1%).
 - Spice shows **subpar scalability**:
-  The speed-up of using 16 threads was merely ~10x (compared to Rayon's ~14x).
+  The speed-up of using 16 threads was merely ~11x (compared to Rayon's ~14x).
 
 ## Methodology
 
@@ -135,7 +135,7 @@ If we're seeing sub-linear scalability when increasing the number of threads the
 
 ## Results
 
-- Commit: `7f83c6875a8237cc0b4ee479c4b99a7edb449213`
+- Commit: `0b697d6d7af98e3db3501933c45302521b606a93`
 - Command: `make bench`
 
 These benchmarks were executed in Google Cloud (the `europe-west4` region) on a `c4-standard-16` instance which has 16 vCPUs and 60GB memory.
@@ -182,7 +182,7 @@ cargo 1.77.1
 **Baseline implementation:**
 Both languages perform better on the small tree compared to the large tree.
 This can be explained by the smaller tree being able to fit in cache.
-Interestingly, the Rust implementation is _twice_ as slow as Zig's (7.48 ns vs 3.65 ns) for the large tree.
+Interestingly, the Rust implementation is _twice_ as slow as Zig's (7.48 ns vs 3.63 ns) for the large tree.
 It's not obvious why this is the case.
 (Another interesting anecdote: On a M3 Pro then Spice using 1 thread is actually _faster_ than the baseline implementation despite it definitely containing more instructions. This shows that it can be hard to reason about performance on the presence of caches, pipelining and branch predictions.)
 
@@ -194,9 +194,9 @@ The minimum amount of work should rather be in the range of _microseconds_.
 Spice on the other hand has a sub-nanosecond overhead and is capable of reducing the latency of ~3.3x by using 4 cores.
 
 **Scalability:**
-Rayon shows good scalability _when the tree is large enough_: 
+Rayon shows good scalability _when the tree is large enough_:
 Latency is reduced by ~14x by using 16 cores.
-In comparison, Spice only achieves ~10x speed-up in the same scenario.
+In comparison, Spice only achieves ~11x speed-up in the same scenario.
 Considering the design of Spice this is most likely caused by poor scheduling and idle threads and _not_ competing threads.
 
 **Contention:**

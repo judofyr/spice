@@ -23,7 +23,7 @@ These benchmarks were ran on a `c4-standard-16` instance in Google Cloud with 16
 Rayon itself shows a nice ~14x speed-up (from 22.99 ns to 1.64 ns) at 16 threads, but compared to the _baseline_ this ends up only being ~4.5x due to the overhead.
 
 In comparison, Spice scales slightly worse:
-It only got ~10x speed-up when going from 1 to 16 threads.
+It only got ~11x speed-up when going from 1 to 16 threads.
 However, due its low overhead this is also essentially the speed-up compared to the baseline.
 
 (It's not entirely clear why the Zig baseline implementation is twice as fast as the Rust implementation.
@@ -65,7 +65,6 @@ The last example of summing over 1000 nodes behaves as follows in Spice:
 
 What's happening here is that it's discovering that the duration is too short so none of the multi-threading kicks in.
 All the extra threads here are sleeping, giving the cores time to execute other programs.
-The variance in timings are explained by the short duration of this benchmark.
 
 Spice is **primarily a research project**.
 Read along to learn more about it, but if you're considering using it in production you should be aware of its [many limitations](#limitations).
