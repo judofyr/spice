@@ -76,6 +76,7 @@ _(See the [bench/](bench/) directory for more details about these specific bench
 - [Using Spice](#using-spice)
 - [Work-stealing and its inefficiencies](#work-stealing-and-its-inefficiencies)
 - [Implementation details](#implementation-details)
+  - [Optimizing for static dispatch](#optimizing-for-static-dispatch)
   - [Low-overhead heartbeating signaling](#low-overhead-heartbeating-signaling)
   - [Global mutex is fine when there's no contention](#global-mutex-is-fine-when-theres-no-contention)
   - [Branch-free doubly-linked list](#branch-free-doubly-linked-list)
@@ -203,6 +204,47 @@ Spice directly tackles all of these inefficiencies:
 ## Implementation details
 
 Let's dive further into how Spice is implemented to achieve its efficient parallelism.
+
+### Optimizing for static dispatch
+
+A fork/join program has a set of code blocks which are executed in parallel and once they finish the `join` action completes:
+
+```
+join(
+  fork { code1 }
+  fork { code2 }
+  fork { code3 }
+)
+```
+
+In Spice this is represented as:
+
+```
+job1 = fork { code1 }  // Place on the queue
+job2 = fork { code2 }  // Place on the queue
+
+code3 // Run right away
+
+if (job2.isExecuting()) {
+  // Job was picked up by another thread. Wait for it.
+  job2.wait()
+} else {
+  code2
+}
+
+if (job1.isExecuting()) {
+  // Job was picked up by another thread. Wait for it.
+  job1.wait()
+} else {
+  code1
+}
+```
+
+Notice that `code1` and `code2` has been duplicated_inside the function.
+This is actually a _good_ thing.
+Most of the time the job will _not_ be picked up by another thread.
+In this case, our program nicely turns into the sequential version (although in reverse order) with a few extra branches which are all very predictable.
+This is friendly both for the code optimizer (e.g. it can now inline the function call) and the CPU.
 
 ### Low-overhead heartbeating signaling
 
