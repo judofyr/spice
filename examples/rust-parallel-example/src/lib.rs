@@ -4,30 +4,32 @@ pub struct Node {
     right: Option<Box<Node>>,
 }
 
-pub fn make_balanced_tree(from: i64, to: i64) -> Node {
-    let value = from + (to - from) / 2;
-    Node {
-        value,
-        left: (value > from).then(|| Box::new(make_balanced_tree(from, value - 1))),
-        right: (value < to).then(|| Box::new(make_balanced_tree(value + 1, to))),
-    }
-}
-
-pub fn sum(node: &Node) -> i64 {
-    match (&node.left, &node.right) {
-        (Some(left), Some(right)) => node.value + sum(left) + sum(right),
-        (Some(child), _) | (_, Some(child)) => node.value + sum(child),
-        (None, None) => node.value,
-    }
-}
-
-pub fn sum_rayon(pool: &rayon::ThreadPool, node: &Node) -> i64 {
-    match (&node.left, &node.right) {
-        (Some(left), Some(right)) => {
-            let (left, right) = pool.join(|| sum_rayon(pool, left), || sum_rayon(pool, right));
-            node.value + left + right
+impl Node {
+    pub fn make_balanced_tree(from: i64, to: i64) -> Self {
+        let value = from + (to - from) / 2;
+        Node {
+            value,
+            left: (value > from).then(|| Self::make_balanced_tree(from, value - 1).into()),
+            right: (value < to).then(|| Self::make_balanced_tree(value + 1, to).into()),
         }
-        (Some(child), _) | (_, Some(child)) => node.value + sum_rayon(pool, child),
-        (None, None) => node.value,
+    }
+
+    pub fn sum(&self) -> i64 {
+        match (&self.left, &self.right) {
+            (Some(left), Some(right)) => self.value + left.sum() + right.sum(),
+            (Some(child), _) | (_, Some(child)) => self.value + child.sum(),
+            (None, None) => self.value,
+        }
+    }
+
+    pub fn sum_rayon(&self, pool: &rayon::ThreadPool) -> i64 {
+        match (&self.left, &self.right) {
+            (Some(left), Some(right)) => {
+                let (left, right) = pool.join(|| left.sum_rayon(pool), || right.sum_rayon(pool));
+                self.value + left + right
+            }
+            (Some(child), _) | (_, Some(child)) => self.value + child.sum_rayon(pool),
+            (None, None) => self.value,
+        }
     }
 }
