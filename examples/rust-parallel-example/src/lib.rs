@@ -14,29 +14,20 @@ pub fn make_balanced_tree(from: i64, to: i64) -> Node {
 }
 
 pub fn sum(node: &Node) -> i64 {
-    let mut result = node.value;
-    if let Some(child) = &node.left {
-        result += sum(child);
+    match (&node.left, &node.right) {
+        (Some(left), Some(right)) => node.value + sum(left) + sum(right),
+        (Some(child), _) | (_, Some(child)) => node.value + sum(child),
+        (None, None) => node.value,
     }
-    if let Some(child) = &node.right {
-        result += sum(child);
-    }
-    result
 }
 
 pub fn sum_rayon(pool: &rayon::ThreadPool, node: &Node) -> i64 {
-    if let (Some(left), Some(right)) = (&node.left, &node.right) {
-        let (left_result, right_result) =
-            pool.join(|| sum_rayon(pool, left), || sum_rayon(pool, right));
-        return node.value + left_result + right_result;
+    match (&node.left, &node.right) {
+        (Some(left), Some(right)) => {
+            let (left, right) = pool.join(|| sum_rayon(pool, left), || sum_rayon(pool, right));
+            node.value + left + right
+        }
+        (Some(child), _) | (_, Some(child)) => node.value + sum_rayon(pool, child),
+        (None, None) => node.value,
     }
-
-    let mut result = node.value;
-    if let Some(child) = &node.left {
-        result += sum_rayon(pool, child);
-    }
-    if let Some(child) = &node.right {
-        result += sum_rayon(pool, child);
-    }
-    result
 }
