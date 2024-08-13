@@ -35,7 +35,7 @@ It becomes even more interesting if we're summing the nodes of a much smaller tr
 ![Time to calculate sum of binary tree of 1000 nodes with Rayon](bench/rayon-tree-sum-1000.svg)
 
 In this scenario we have a very short duration of our program:
-The baseline implementation takes 1.56 _microseconds_ in total to run.
+The baseline implementation takes 1.56 _nanoseconds_ in total to run.
 For some reason the overhead is a bit higher (~19 ns), but more concerningly we see that performance becomes _worse_ the _more_ threads we're adding.
 At 32 threads it's in total **60 times slower**.
 
