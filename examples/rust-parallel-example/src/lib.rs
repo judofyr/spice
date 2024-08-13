@@ -1,10 +1,10 @@
-pub struct Node<T> {
-    value: T,
-    left: Option<Box<Node<T>>>,
-    right: Option<Box<Node<T>>>,
+pub struct Node {
+    value: i64,
+    left: Option<Box<Node>>,
+    right: Option<Box<Node>>,
 }
 
-pub fn make_balanced_tree(from: i64, to: i64) -> Node<i64> {
+pub fn make_balanced_tree(from: i64, to: i64) -> Node {
     let value = from + (to - from) / 2;
     Node {
         value,
@@ -13,7 +13,7 @@ pub fn make_balanced_tree(from: i64, to: i64) -> Node<i64> {
     }
 }
 
-pub fn sum(node: &Node<i64>) -> i64 {
+pub fn sum(node: &Node) -> i64 {
     let mut result = node.value;
     if let Some(child) = &node.left {
         result += sum(child);
@@ -24,7 +24,7 @@ pub fn sum(node: &Node<i64>) -> i64 {
     result
 }
 
-pub fn sum_rayon(pool: &rayon::ThreadPool, node: &Node<i64>) -> i64 {
+pub fn sum_rayon(pool: &rayon::ThreadPool, node: &Node) -> i64 {
     if let (Some(left), Some(right)) = (&node.left, &node.right) {
         let (left_result, right_result) =
             pool.join(|| sum_rayon(pool, left), || sum_rayon(pool, right));
