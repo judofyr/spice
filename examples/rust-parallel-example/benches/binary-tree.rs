@@ -1,5 +1,4 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use rayon;
 use parallel_example::{sum, sum_rayon, make_balanced_tree};
 
 fn criterion_benchmark(c: &mut Criterion) {
