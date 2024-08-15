@@ -13,7 +13,12 @@
 The benchmark in the figure above (summing over the nodes in a binary tree) is typically one of the worst cases for parallelism frameworks:
 The actual operation is extremely fast so any sort of overhead will have a measurable impact.
 
-Here's the exact same benchmark in [Rayon][rayon], an excellent library in Rust which uses work-stealing fork/join:
+Here's the _exact_ same benchmark in [Rayon][rayon], an excellent library in Rust for doing parallelism.
+Both implementations follow the same fork/join API which gives code that is very easy to read and reason about.
+None of the findings here would surprise anyone who deeply knows Rayon and there are ways of getting better performance out of Rayon by using different techniques.
+This comes at cost of the code becoming more complicated and/or behaving subpar on different types of input.
+The purpose of this benchmark is to not discourage use of Rayon (on the contrary!), but rather demonstrate that it _is_ possible to have both simple code and good parallelism.
+See [issue #5](https://github.com/judofyr/spice/issues/5) for a longer discussion.
 
 ![Time to calculate sum of binary tree of 100M nodes with Rayon](bench/rayon-tree-sum-100M.svg)
 

@@ -7,6 +7,8 @@ Date: August 2024.
 [Rayon][rayon] is high-quality data-parallelism library written in Rust based on the well-known technique of _work-stealing fork/join_.
 [Spice](..), written in Zig, is an experimental implementation of _heartbeat scheduling_ which claims to have a much smaller overhead.
 We'd like to understand how these two techniques compares against each other.
+Rayon also provides a set of API around `ParallelIterator`.
+We're not focusing on these since it's not comparable to the API which Spice provides.
 
 Evaluations of parallel frameworks are often summarized along the lines of "we implemented X algorithms, ran it on a machine with 48 cores and saw a (geometric) mean improvement of 34x".
 This is a fine way of validating that it works for a wide range of problems, but it's hard to draw conclusions from the final result.
@@ -17,7 +19,7 @@ Further benchmarks are recommended to validate the findings.
 
 ## Key findings and recommendations
 
-- Rayon adds roughly **15 nanoseconds** overhead for a single invocation of `fork/join`.
+- Rayon adds roughly **15 nanoseconds** overhead for a single invocation of `rayon::join`.
   This means the smallest amount of work should take around **~1 microsecond** for the overhead be negligible (<1%).
 - Rayon shows **good linear scalability**: ~14x performance improvement when going from 1 to 16 threads.
   This was when the total duration of the program was in the scale of **seconds**.
