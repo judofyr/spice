@@ -10,6 +10,8 @@
   Threads will never compete (i.e. spin) over the same work.
   Adding more threads to the system will not make your program any slower, but the extra threads might be completely idle since there's nothing useful to do.
 
+_(Update, September 2024: [Chili](https://github.com/dragostis/chili) is a Rust port of the ideas presented here. Check it out!)_
+
 The benchmark in the figure above (summing over the nodes in a binary tree) is typically one of the worst cases for parallelism frameworks:
 The actual operation is extremely fast so any sort of overhead will have a measurable impact.
 
