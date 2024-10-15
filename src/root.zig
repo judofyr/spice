@@ -184,7 +184,7 @@ pub const ThreadPool = struct {
 
     /// The core logic of the heartbeat. Every executing worker invokes this periodically.
     fn heartbeat(self: *ThreadPool, worker: *Worker) void {
-        @setCold(true);
+        @branchHint(.cold);
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -527,7 +527,7 @@ pub fn Future(comptime Input: type, Output: type) type {
         }
 
         fn joinExecuting(self: *Self, task: *Task) ?Output {
-            @setCold(true);
+            @branchHint(.cold);
 
             const w = task.worker;
             const pool = w.pool;
