@@ -23,7 +23,7 @@ plt.title(title, fontdict={'fontweight': 'bold'}, pad=10)
 plt.grid(axis='x', color='#ccc')
 bars = plt.barh(labels, values, height=0.4)
 plt.bar_label(bars, ["{:.2f} ns".format(value) for value in values], padding=3)
-plt.xlabel("time per node [nanoseconds]", labelpad=10)
+plt.xlabel("total wall time divided by node count [nanoseconds]", labelpad=10)
 
 ax = plt.gca()
 ax.set_axisbelow(True)
