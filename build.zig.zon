@@ -18,8 +18,9 @@
     // internet connectivity.
     .dependencies = .{
         .parg = .{
-            .url = "https://github.com/judofyr/parg/archive/229fa709c1fc2e94490a736e17151cb85a328a81.tar.gz",
-            .hash = "1220b3da27690b99a15babef2e56d74d4683eb06ad0c2ac35ef883767177556bb344",
+            .url = "https://github.com/judofyr/parg/archive/b9ce29e3dcbf9845dac8ee4b33a31bb1bff29f80.tar.gz",
+            .hash = "parg-0.0.0-dOPWZNhYAABEHE6EGXmwIucnu9vj-emodT9vmHeYynAP",
+            .lazy = true,
         },
     },
     .paths = .{

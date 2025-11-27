@@ -85,14 +85,15 @@ fn sum(t: *spice.Task, node: *Node) i64 {
 }
 
 const BaselineTreeSum = struct {
-    pub fn writeName(self: *BaselineTreeSum, writer: anytype) !void {
+    pub fn writeName(self: *BaselineTreeSum, writer: *std.Io.Writer) !void {
         _ = self;
-        try std.fmt.format(writer, "Baseline", .{});
+        try writer.print("Baseline", .{});
     }
 
-    pub fn init(self: *BaselineTreeSum, allocator: std.mem.Allocator) void {
+    pub fn init(self: *BaselineTreeSum, allocator: std.mem.Allocator, io: std.Io) void {
         _ = self;
         _ = allocator;
+        _ = io;
     }
 
     pub fn deinit(self: *BaselineTreeSum) void {
@@ -109,16 +110,16 @@ const SpiceTreeSum = struct {
     num_threads: usize,
     thread_pool: spice.ThreadPool = undefined,
 
-    pub fn writeName(self: *SpiceTreeSum, writer: anytype) !void {
+    pub fn writeName(self: *SpiceTreeSum, writer: *std.Io.Writer) !void {
         if (self.num_threads == 1) {
-            try std.fmt.format(writer, "Spice 1 thread", .{});
+            try writer.print("Spice 1 thread", .{});
         } else {
-            try std.fmt.format(writer, "Spice {} threads", .{self.num_threads});
+            try writer.print("Spice {} threads", .{self.num_threads});
         }
     }
 
-    pub fn init(self: *SpiceTreeSum, allocator: std.mem.Allocator) void {
-        self.thread_pool = spice.ThreadPool.init(allocator);
+    pub fn init(self: *SpiceTreeSum, allocator: std.mem.Allocator, io: std.Io) void {
+        self.thread_pool = spice.ThreadPool.init(allocator, io);
         self.thread_pool.start(.{ .background_worker_count = self.num_threads - 1 });
     }
 
@@ -136,21 +137,24 @@ const warmup_duration = 3 * std.time.ns_per_s;
 
 const Runner = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     n: usize,
-    csv: ?std.fs.File = null,
+    csv: ?std.fs.File.Writer = null,
 
     pub fn run(self: *Runner, bench: anytype, input: anytype) !void {
-        var out = std.io.getStdOut();
+        var out = std.fs.File.stdout();
+        var out_buf: [512]u8 = undefined;
+        var outw = out.writer(&out_buf);
 
         var name_buf: [255]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&name_buf);
-        try bench.writeName(fbs.writer());
-        const name = fbs.getWritten();
+        var fbs = std.Io.Writer.fixed(&name_buf);
+        try bench.writeName(&fbs);
+        const name = fbs.buffered();
 
-        try out.writer().print("{s}:\n", .{name});
-        try out.writer().print("  Warming up...\n", .{});
+        try outw.interface.print("{s}:\n", .{name});
+        try outw.interface.print("  Warming up...\n", .{});
 
-        bench.init(self.allocator);
+        bench.init(self.allocator, self.io);
         defer bench.deinit();
 
         {
@@ -160,14 +164,16 @@ const Runner = struct {
                 const output = bench.run(input);
                 warmup_iter += 1;
                 if (timer.read() >= warmup_duration) {
-                    try out.writer().print("  Warmup iterations: {}\n", .{warmup_iter});
-                    try out.writer().print("  Warmup result: {}\n\n", .{output});
+                    try outw.interface.print("  Warmup iterations: {}\n", .{warmup_iter});
+                    try outw.interface.print("  Warmup result: {}\n\n", .{output});
+                    try outw.interface.flush();
                     break;
                 }
             }
         }
 
-        try out.writer().print("  Running {} times...\n", .{n_samples});
+        try outw.interface.print("  Running {} times...\n", .{n_samples});
+        try outw.interface.flush();
         var sample_times: [n_samples]f64 = undefined;
         for (0..n_samples) |i| {
             var timer = std.time.Timer.start() catch @panic("timer error");
@@ -178,16 +184,18 @@ const Runner = struct {
 
         const mean = memSum(f64, &sample_times) / n_samples;
 
-        try out.writer().print("  Mean: {d} ns\n  Min: {d} ns\n  Max: {d} ns\n", .{
+        try outw.interface.print("  Mean: {d} ns\n  Min: {d} ns\n  Max: {d} ns\n", .{
             mean,
             std.mem.min(f64, &sample_times),
             std.mem.max(f64, &sample_times),
         });
 
-        try out.writer().print("\n", .{});
+        try outw.interface.print("\n", .{});
+        try outw.interface.flush();
 
-        if (self.csv) |csv| {
-            try csv.writer().print("{s},{d}\n", .{ name, mean });
+        if (self.csv) |*csv| {
+            try csv.interface.print("{s},{d}\n", .{ name, mean });
+            try csv.interface.flush();
         }
     }
 };
@@ -201,8 +209,10 @@ fn memSum(comptime T: type, slice: []const T) T {
 }
 
 fn failArgs(comptime format: []const u8, args: anytype) noreturn {
-    var err = std.io.getStdErr();
-    err.writer().print("invalid arguments: " ++ format ++ "\n", args) catch @panic("failed to print to stderr");
+    var buf: [512]u8 = undefined;
+    var err = std.fs.File.stderr();
+    var writer = err.writer(&buf);
+    writer.interface.print("invalid arguments: " ++ format ++ "\n", args) catch @panic("failed to print to stderr");
     std.process.exit(1);
 }
 
@@ -219,11 +229,16 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
 
+    var threaded = std.Io.Threaded.init(gpa.allocator());
+    defer threaded.deinit();
+
     var n: ?usize = null;
-    var csv: ?std.fs.File = null;
+    var csv_buf: [512]u8 = undefined;
+    var csv_file: std.fs.File = undefined;
+    var csv: ?std.fs.File.Writer = null;
     var enable_baseline = false;
-    var num_threads_list = std.ArrayList(usize).init(gpa.allocator());
-    defer num_threads_list.deinit();
+    var num_threads_list = std.ArrayList(usize).empty;
+    defer num_threads_list.deinit(gpa.allocator());
     var defaults = true;
     var show_usage = false;
     var no_args = true;
@@ -242,20 +257,21 @@ pub fn main() !void {
                     const n_str = p.nextValue() orelse failArgs("-n requires a value", .{});
                     n = std.fmt.parseInt(usize, n_str, 10) catch failArgs("-n must be an integer", .{});
                 } else if (flag.isLong("csv")) {
-                    const csv_file = p.nextValue() orelse failArgs("--csv requires a value", .{});
-                    csv = try std.fs.cwd().createFile(csv_file, .{});
+                    const csv_path = p.nextValue() orelse failArgs("--csv requires a value", .{});
+                    csv_file = try std.fs.cwd().createFile(csv_path, .{});
+                    csv = csv_file.writer(&csv_buf);
                 } else if (flag.isLong("baseline")) {
                     enable_baseline = true;
                     defaults = false;
                 } else if (flag.isShort("t") or flag.isLong("threads")) {
-                    const num_threads_str = p.nextValue() orelse failArgs("{} requires a value", .{flag});
-                    const num_threads = std.fmt.parseInt(usize, num_threads_str, 10) catch failArgs("{} must be an integer", .{flag});
-                    try num_threads_list.append(num_threads);
+                    const num_threads_str = p.nextValue() orelse failArgs("{f} requires a value", .{flag});
+                    const num_threads = std.fmt.parseInt(usize, num_threads_str, 10) catch failArgs("{f} must be an integer", .{flag});
+                    try num_threads_list.append(gpa.allocator(), num_threads);
                     defaults = false;
                 } else if (flag.isShort("h") or flag.isLong("help")) {
                     show_usage = true;
                 } else {
-                    failArgs("{} is a not a valid flag", .{flag});
+                    failArgs("{f} is a not a valid flag", .{flag});
                 }
             },
             .arg => |arg| {
@@ -278,13 +294,14 @@ pub fn main() !void {
 
     if (defaults) {
         enable_baseline = true;
-        try num_threads_list.appendSlice(&[_]usize{ 1, 2, 4, 8, 16, 32 });
+        try num_threads_list.appendSlice(gpa.allocator(), &[_]usize{ 1, 2, 4, 8, 16, 32 });
     }
 
     const root = try balancedTree(arena.allocator(), 0, @intCast(n.?));
 
     var runner = Runner{
         .allocator = gpa.allocator(),
+        .io = threaded.io(),
         .n = n.?,
         .csv = csv,
     };
@@ -299,5 +316,7 @@ pub fn main() !void {
         try runner.run(&bench, root);
     }
 
-    if (csv) |c| c.close();
+    if (csv) |_| {
+        csv_file.close();
+    }
 }
