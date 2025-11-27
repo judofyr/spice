@@ -16,6 +16,7 @@ pub const ThreadPoolConfig = struct {
 
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     mutex: std.Thread.Mutex = .{},
     /// List of all workers.
     workers: std.ArrayListUnmanaged(*Worker) = .{},
@@ -38,10 +39,11 @@ pub const ThreadPool = struct {
 
     heartbeat_interval: usize,
 
-    pub fn init(allocator: std.mem.Allocator) ThreadPool {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) ThreadPool {
         return ThreadPool{
             .allocator = allocator,
-            .execute_state_pool = std.heap.MemoryPool(JobExecuteState).init(allocator),
+            .io = io,
+            .execute_state_pool = .empty,
             .heartbeat_interval = undefined,
         };
     }
@@ -89,7 +91,7 @@ pub const ThreadPool = struct {
         // Free up memory:
         self.background_threads.deinit(self.allocator);
         self.workers.deinit(self.allocator);
-        self.execute_state_pool.deinit();
+        self.execute_state_pool.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -151,7 +153,7 @@ pub const ThreadPool = struct {
                 }
             }
 
-            std.time.sleep(to_sleep);
+            self.io.sleep(std.Io.Duration.fromNanoseconds(to_sleep), .awake) catch |err| std.debug.panic("sleep error: {}", .{err});
         }
     }
 
@@ -192,7 +194,7 @@ pub const ThreadPool = struct {
         if (worker.shared_job == null) {
             if (worker.job_head.shift()) |job| {
                 // Allocate an execute state for it:
-                const execute_state = self.execute_state_pool.create() catch @panic("OOM");
+                const execute_state = self.execute_state_pool.create(self.allocator) catch @panic("OOM");
                 execute_state.* = .{
                     .result = undefined,
                 };
@@ -452,7 +454,7 @@ const Job = struct {
 const max_result_words = 4;
 
 const JobExecuteState = struct {
-    done: std.Thread.ResetEvent = .{},
+    done: std.Thread.ResetEvent = .unset,
     result: ResultType,
 
     const ResultType = [max_result_words]u64;

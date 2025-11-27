@@ -19,16 +19,24 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
     });
 
-    const parg = b.dependency("parg", .{});
+    if (b.option(
+        bool,
+        "examples",
+        "Build examples",
+    ) orelse false) {
+        const parg = b.lazyDependency("parg", .{}) orelse return;
 
-    const example = b.addExecutable(.{
-        .name = "spice-example",
-        .root_source_file = b.path("examples/zig-parallel-example/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    example.root_module.addImport("spice", mod);
-    example.root_module.addImport("parg", parg.module("parg"));
+        const example = b.addExecutable(.{
+            .name = "spice-example",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/zig-parallel-example/main.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        example.root_module.addImport("spice", mod);
+        example.root_module.addImport("parg", parg.module("parg"));
 
-    b.installArtifact(example);
+        b.installArtifact(example);
+    }
 }

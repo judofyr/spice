@@ -18,7 +18,7 @@ plot-rayon: $(foreach n,$(N),bench/rayon-tree-sum-$(n).svg)
 ## Spice
 
 bench/spice-tree-sum-%.csv:
-	zig build -Doptimize=ReleaseFast
+	zig build -Doptimize=ReleaseFast -Dexamples
 	./zig-out/bin/spice-example -n $(call expand_SI,$*) --csv $@
 
 bench/spice-tree-sum-%.svg: bench/spice-tree-sum-%.csv bench/plot.py
