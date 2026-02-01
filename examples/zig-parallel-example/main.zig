@@ -139,12 +139,12 @@ const Runner = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     n: usize,
-    csv: ?std.fs.File.Writer = null,
+    csv: ?std.Io.File.Writer = null,
 
     pub fn run(self: *Runner, bench: anytype, input: anytype) !void {
-        var out = std.fs.File.stdout();
+        var out = std.Io.File.stdout();
         var out_buf: [512]u8 = undefined;
-        var outw = out.writer(&out_buf);
+        var outw = out.writer(self.io, &out_buf);
 
         var name_buf: [255]u8 = undefined;
         var fbs = std.Io.Writer.fixed(&name_buf);
@@ -208,42 +208,29 @@ fn memSum(comptime T: type, slice: []const T) T {
     return result;
 }
 
-fn failArgs(comptime format: []const u8, args: anytype) noreturn {
+fn failArgs(io: std.Io, comptime format: []const u8, args: anytype) noreturn {
     var buf: [512]u8 = undefined;
-    var err = std.fs.File.stderr();
-    var writer = err.writer(&buf);
+    var err = std.Io.File.stderr();
+    var writer = err.writer(io, &buf);
     writer.interface.print("invalid arguments: " ++ format ++ "\n", args) catch @panic("failed to print to stderr");
+    writer.interface.flush() catch {};
     std.process.exit(1);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer {
-        const check = gpa.deinit();
-        if (check == .leak) {
-            std.debug.print("memory leaked\n", .{});
-            std.process.exit(1);
-        }
-    }
-
-    var arena = std.heap.ArenaAllocator.init(gpa.allocator());
-    defer arena.deinit();
-
-    var threaded = std.Io.Threaded.init(gpa.allocator());
-    defer threaded.deinit();
-
+pub fn main(init: std.process.Init) !void {
     var n: ?usize = null;
     var csv_buf: [512]u8 = undefined;
-    var csv_file: std.fs.File = undefined;
-    var csv: ?std.fs.File.Writer = null;
+    var csv_file: std.Io.File = undefined;
+    var csv: ?std.Io.File.Writer = null;
     var enable_baseline = false;
     var num_threads_list = std.ArrayList(usize).empty;
-    defer num_threads_list.deinit(gpa.allocator());
+    defer num_threads_list.deinit(init.gpa);
     var defaults = true;
     var show_usage = false;
     var no_args = true;
+    const io = init.io;
 
-    var p = try parg.parseProcess(arena.allocator(), .{});
+    var p = try parg.parseProcess(init, .{});
     defer p.deinit();
 
     const program_name = p.nextValue() orelse @panic("no executable name");
@@ -254,31 +241,31 @@ pub fn main() !void {
         switch (token) {
             .flag => |flag| {
                 if (flag.isShort("n")) {
-                    const n_str = p.nextValue() orelse failArgs("-n requires a value", .{});
-                    n = std.fmt.parseInt(usize, n_str, 10) catch failArgs("-n must be an integer", .{});
+                    const n_str = p.nextValue() orelse failArgs(io, "-n requires a value", .{});
+                    n = std.fmt.parseInt(usize, n_str, 10) catch failArgs(io, "-n must be an integer", .{});
                 } else if (flag.isLong("csv")) {
-                    const csv_path = p.nextValue() orelse failArgs("--csv requires a value", .{});
-                    csv_file = try std.fs.cwd().createFile(csv_path, .{});
-                    csv = csv_file.writer(&csv_buf);
+                    const csv_path = p.nextValue() orelse failArgs(io, "--csv requires a value", .{});
+                    csv_file = try std.Io.Dir.cwd().createFile(io, csv_path, .{});
+                    csv = csv_file.writer(io, &csv_buf);
                 } else if (flag.isLong("baseline")) {
                     enable_baseline = true;
                     defaults = false;
                 } else if (flag.isShort("t") or flag.isLong("threads")) {
-                    const num_threads_str = p.nextValue() orelse failArgs("{f} requires a value", .{flag});
-                    const num_threads = std.fmt.parseInt(usize, num_threads_str, 10) catch failArgs("{f} must be an integer", .{flag});
-                    try num_threads_list.append(gpa.allocator(), num_threads);
+                    const num_threads_str = p.nextValue() orelse failArgs(io, "{f} requires a value", .{flag});
+                    const num_threads = std.fmt.parseInt(usize, num_threads_str, 10) catch failArgs(io, "{f} must be an integer", .{flag});
+                    try num_threads_list.append(init.gpa, num_threads);
                     defaults = false;
                 } else if (flag.isShort("h") or flag.isLong("help")) {
                     show_usage = true;
                 } else {
-                    failArgs("{f} is a not a valid flag", .{flag});
+                    failArgs(io, "{f} is a not a valid flag", .{flag});
                 }
             },
             .arg => |arg| {
-                failArgs("{s}", .{arg});
+                failArgs(io, "{s}", .{arg});
             },
             .unexpected_value => |val| {
-                failArgs("{s}", .{val});
+                failArgs(io, "{s}", .{val});
             },
         }
     }
@@ -289,19 +276,19 @@ pub fn main() !void {
     }
 
     if (n == null) {
-        failArgs("-n is required.", .{});
+        failArgs(io, "-n is required.", .{});
     }
 
     if (defaults) {
         enable_baseline = true;
-        try num_threads_list.appendSlice(gpa.allocator(), &[_]usize{ 1, 2, 4, 8, 16, 32 });
+        try num_threads_list.appendSlice(init.gpa, &[_]usize{ 1, 2, 4, 8, 16, 32 });
     }
 
-    const root = try balancedTree(arena.allocator(), 0, @intCast(n.?));
+    const root = try balancedTree(init.arena.allocator(), 0, @intCast(n.?));
 
     var runner = Runner{
-        .allocator = gpa.allocator(),
-        .io = threaded.io(),
+        .allocator = init.gpa,
+        .io = init.io,
         .n = n.?,
         .csv = csv,
     };
@@ -317,6 +304,6 @@ pub fn main() !void {
     }
 
     if (csv) |_| {
-        csv_file.close();
+        csv_file.close(io);
     }
 }
