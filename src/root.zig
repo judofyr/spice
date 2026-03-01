@@ -17,19 +17,19 @@ pub const ThreadPoolConfig = struct {
 pub const ThreadPool = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    mutex: std.Thread.Mutex = .{},
+    mutex: std.Io.Mutex = .init,
     /// List of all workers.
-    workers: std.ArrayListUnmanaged(*Worker) = .{},
+    workers: std.ArrayList(*Worker) = .empty,
     /// List of all background workers.
-    background_threads: std.ArrayListUnmanaged(std.Thread) = .{},
+    background_threads: std.ArrayList(std.Thread) = .empty,
     /// The background thread which beats.
     heartbeat_thread: ?std.Thread = null,
     /// A pool for the JobExecuteState, to minimize allocations.
     execute_state_pool: std.heap.MemoryPool(JobExecuteState),
     /// This is used to signal that more jobs are now ready.
-    job_ready: std.Thread.Condition = .{},
+    job_ready: std.Io.Condition = .init,
     /// This is used to wait for the background workers to be available initially.
-    workers_ready: std.Thread.Semaphore = .{},
+    workers_ready: std.Io.Semaphore = .{},
     /// This is set to true once we're trying to stop.
     is_stopping: bool = false,
 
@@ -65,18 +65,18 @@ pub const ThreadPool = struct {
 
         // Wait for all of them to be ready:
         for (0..actual_count) |_| {
-            self.workers_ready.wait();
+            self.workers_ready.wait(self.io) catch unreachable;
         }
     }
 
     pub fn deinit(self: *ThreadPool) void {
         // Tell all background workers to stop:
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lock(self.io) catch @panic("cancelled lock");
+            defer self.mutex.unlock(self.io);
 
             self.is_stopping = true;
-            self.job_ready.broadcast();
+            self.job_ready.broadcast(self.io);
         }
 
         // Wait for background workers to stop:
@@ -99,8 +99,8 @@ pub const ThreadPool = struct {
         var w = Worker{ .pool = self };
         var first = true;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch @panic("cancelled lock");
+        defer self.mutex.unlock(self.io);
 
         self.workers.append(self.allocator, &w) catch @panic("OOM");
 
@@ -112,8 +112,8 @@ pub const ThreadPool = struct {
 
             if (self._popReadyJob()) |job| {
                 // Release the lock while executing the job.
-                self.mutex.unlock();
-                defer self.mutex.lock();
+                self.mutex.unlock(self.io);
+                defer self.mutex.lock(self.io) catch @panic("cancelled lock");
 
                 w.executeJob(job);
 
@@ -122,11 +122,11 @@ pub const ThreadPool = struct {
 
             if (first) {
                 // Register that we are ready.
-                self.workers_ready.post();
+                self.workers_ready.post(self.io);
                 first = false;
             }
 
-            self.job_ready.wait(&self.mutex);
+            self.job_ready.wait(self.io, &self.mutex) catch @panic("cancelled lock");
         }
     }
 
@@ -139,8 +139,8 @@ pub const ThreadPool = struct {
             var to_sleep: u64 = self.heartbeat_interval;
 
             {
-                self.mutex.lock();
-                defer self.mutex.unlock();
+                self.mutex.lock(self.io) catch @panic("cancelled lock");
+                defer self.mutex.unlock(self.io);
 
                 if (self.is_stopping) break;
 
@@ -162,15 +162,15 @@ pub const ThreadPool = struct {
 
         var worker = Worker{ .pool = self };
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lock(self.io) catch @panic("cancelled lock");
+            defer self.mutex.unlock(self.io);
 
             self.workers.append(self.allocator, &worker) catch @panic("OOM");
         }
 
         defer {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lock(self.io) catch @panic("cancelled lock");
+            defer self.mutex.unlock(self.io);
 
             for (self.workers.items, 0..) |worker_ptr, idx| {
                 if (worker_ptr == &worker) {
@@ -188,14 +188,15 @@ pub const ThreadPool = struct {
     fn heartbeat(self: *ThreadPool, worker: *Worker) void {
         @branchHint(.cold);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch @panic("cancelled lock");
+        defer self.mutex.unlock(self.io);
 
         if (worker.shared_job == null) {
             if (worker.job_head.shift()) |job| {
                 // Allocate an execute state for it:
                 const execute_state = self.execute_state_pool.create(self.allocator) catch @panic("OOM");
                 execute_state.* = .{
+                    .io = self.io,
                     .result = undefined,
                 };
                 job.setExecuteState(execute_state);
@@ -204,7 +205,7 @@ pub const ThreadPool = struct {
                 worker.job_time = self.time;
                 self.time += 1;
 
-                self.job_ready.signal(); // wake up one thread
+                self.job_ready.signal(self.io); // wake up one thread
             }
         }
 
@@ -217,8 +218,8 @@ pub const ThreadPool = struct {
         const exec_state = job.getExecuteState();
 
         {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lock(self.io) catch @panic("cancelled lock");
+            defer self.mutex.unlock(self.io);
 
             if (worker.shared_job == job) {
                 // This is the job we attempted to share with someone else, but before someone picked it up.
@@ -230,8 +231,8 @@ pub const ThreadPool = struct {
             // Help out by picking up more work if it's available.
             while (!exec_state.done.isSet()) {
                 if (self._popReadyJob()) |other_job| {
-                    self.mutex.unlock();
-                    defer self.mutex.lock();
+                    self.mutex.unlock(self.io);
+                    defer self.mutex.lock(self.io) catch @panic("cancelled lock");
 
                     worker.executeJob(other_job);
                 } else {
@@ -240,7 +241,7 @@ pub const ThreadPool = struct {
             }
         }
 
-        exec_state.done.wait();
+        exec_state.done.wait(self.io) catch @panic("cancelled wait");
         return true;
     }
 
@@ -270,8 +271,8 @@ pub const ThreadPool = struct {
     }
 
     fn destroyExecuteState(self: *ThreadPool, exec_state: *JobExecuteState) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch @panic("cancelled lock");
+        defer self.mutex.unlock(self.io);
 
         self.execute_state_pool.destroy(exec_state);
     }
@@ -454,7 +455,8 @@ const Job = struct {
 const max_result_words = 4;
 
 const JobExecuteState = struct {
-    done: std.Thread.ResetEvent = .unset,
+    io: std.Io,
+    done: std.Io.Event = .unset,
     result: ResultType,
 
     const ResultType = [max_result_words]u64;
@@ -494,7 +496,7 @@ pub fn Future(comptime Input: type, Output: type) type {
                     const exec_state = job.getExecuteState();
                     const value = t.call(Output, func, fut.input);
                     exec_state.resultPtr(Output).* = value;
-                    exec_state.done.set();
+                    exec_state.done.set(exec_state.io);
                 }
             }.handler;
             self.input = input;

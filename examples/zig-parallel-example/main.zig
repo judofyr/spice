@@ -158,12 +158,12 @@ const Runner = struct {
         defer bench.deinit();
 
         {
-            var timer = std.time.Timer.start() catch @panic("timer error");
+            const now = std.Io.Timestamp.now(self.io, .awake);
             var warmup_iter: usize = 0;
             while (true) {
                 const output = bench.run(input);
                 warmup_iter += 1;
-                if (timer.read() >= warmup_duration) {
+                if (now.untilNow(self.io, .awake).toNanoseconds() >= warmup_duration) {
                     try outw.interface.print("  Warmup iterations: {}\n", .{warmup_iter});
                     try outw.interface.print("  Warmup result: {}\n\n", .{output});
                     try outw.interface.flush();
@@ -176,9 +176,9 @@ const Runner = struct {
         try outw.interface.flush();
         var sample_times: [n_samples]f64 = undefined;
         for (0..n_samples) |i| {
-            var timer = std.time.Timer.start() catch @panic("timer error");
+            const now = std.Io.Timestamp.now(self.io, .awake);
             std.mem.doNotOptimizeAway(bench.run(input));
-            const dur = timer.read();
+            const dur = now.untilNow(self.io, .awake).toNanoseconds();
             sample_times[i] = @as(f64, @floatFromInt(dur)) / @as(f64, @floatFromInt(self.n));
         }
 
