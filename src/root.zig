@@ -424,7 +424,7 @@ const Job = struct {
         std.debug.assert(tail.* == self);
         const prev: *Job = @ptrCast(@alignCast(self.prev_or_null));
         prev.next_or_state = null; // prev.next = null
-        tail.* = @ptrCast(@alignCast(self.prev_or_null)); // tail = self.prev
+        tail.* = prev; // tail = self.prev
         self.* = undefined;
     }
 
