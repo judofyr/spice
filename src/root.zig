@@ -50,7 +50,7 @@ pub const ThreadPool = struct {
 
     /// Starts the thread pool. This should only be invoked once.
     pub fn start(self: *ThreadPool, config: ThreadPoolConfig) void {
-        const actual_count = config.background_worker_count orelse (std.Thread.getCpuCount() catch @panic("getCpuCount error")) - 1;
+        const actual_count = config.background_worker_count orelse ((std.Thread.getCpuCount() catch @panic("getCpuCount error")) - 1);
 
         self.heartbeat_interval = config.heartbeat_interval;
         self.background_threads.ensureUnusedCapacity(self.allocator, actual_count) catch @panic("OOM");
